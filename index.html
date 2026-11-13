@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Task Manager</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --text:#1c1f26; --muted:#6b7280; --line:#e3e6eb; --accent:#4f46e5;
+          --high:#dc2626; --medium:#d97706; --low:#059669; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14161b; --card:#1d2027; --text:#e8eaee; --muted:#9aa1ad; --line:#2d313a; --accent:#818cf8; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; justify-content:space-between; align-items:center; padding:14px 20px; border-bottom:1px solid var(--line); background:var(--card); }
+  h1 { font-size:18px; margin:0; }
+  main { max-width:1100px; margin:0 auto; padding:20px; }
+  input, select, textarea, button { font:inherit; color:inherit; background:var(--card); border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+  button { cursor:pointer; } button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button.small { padding:3px 8px; font-size:13px; }
+  .auth { max-width:340px; margin:80px auto; background:var(--card); padding:24px; border-radius:12px; border:1px solid var(--line); display:grid; gap:10px; }
+  .error { color:var(--high); min-height:1.2em; font-size:14px; }
+  .toolbar, .newtask { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px; }
+  .newtask input[name=title] { flex:1 1 220px; }
+  .board { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:14px; align-items:start; }
+  .col { background:color-mix(in srgb, var(--line) 35%, transparent); border-radius:12px; padding:10px; min-height:120px; }
+  .col h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:4px 6px 10px; }
+  .task { background:var(--card); border:1px solid var(--line); border-left:4px solid var(--medium); border-radius:8px; padding:10px; margin-bottom:8px; }
+  .task.high { border-left-color:var(--high); } .task.low { border-left-color:var(--low); }
+  .task .title { font-weight:600; word-break:break-word; } .task .desc { color:var(--muted); font-size:13px; margin-top:2px; word-break:break-word; }
+  .meta { display:flex; justify-content:space-between; align-items:center; margin-top:8px; font-size:12px; color:var(--muted); }
+  .overdue { color:var(--high); font-weight:600; }
+  .actions { display:flex; gap:4px; }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>✅ Task Manager</h1>
+  <div id="userbar" hidden><span id="who" style="color:var(--muted);margin-right:10px"></span><button id="logout" class="small">Log out</button></div>
+</header>
+
+<section id="authView" class="auth">
+  <h2 id="authTitle" style="margin:0">Log in</h2>
+  <input id="email" type="email" placeholder="Email" autocomplete="username">
+  <input id="password" type="password" placeholder="Password (min 8 chars)" autocomplete="current-password">
+  <div id="authError" class="error"></div>
+  <button id="authSubmit" class="primary">Log in</button>
+  <button id="authToggle" class="small" type="button">Need an account? Register</button>
+</section>
+
+<main id="appView" hidden>
+  <div class="newtask">
+    <input name="title" id="nTitle" placeholder="New task title…" maxlength="200">
+    <select id="nPriority"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select>
+    <input type="date" id="nDue">
+    <button id="add" class="primary">Add task</button>
+  </div>
+  <div class="toolbar">
+    <input id="search" placeholder="Search…" style="flex:1 1 200px">
+    <select id="fPriority"><option value="">All priorities</option><option>high</option><option>medium</option><option>low</option></select>
+  </div>
+  <div id="appError" class="error"></div>
+  <div class="board" id="board"></div>
+</main>
+
+<script>
+const COLS = [['todo','To do'], ['in_progress','In progress'], ['done','Done']];
+const $ = (id) => document.getElementById(id);
+let token = localStorage.getItem('token'), mode = 'login', debounce;
+
+async function api(path, opts = {}) {
+  const res = await fetch('/api' + path, {
+    ...opts,
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  if (res.status === 401 && token) { logout(); throw new Error('Session expired, please log in again'); }
+  const data = res.status === 204 ? null : await res.json();
+  if (!res.ok) throw new Error(data?.error || 'Request failed');
+  return data;
+}
+
+function showApp(email) {
+  $('authView').hidden = true; $('appView').hidden = false; $('userbar').hidden = false;
+  $('who').textContent = email || localStorage.getItem('email') || ''; load();
+}
+function logout() {
+  token = null; localStorage.removeItem('token'); localStorage.removeItem('email');
+  $('authView').hidden = false; $('appView').hidden = true; $('userbar').hidden = true;
+}
+
+$('authToggle').onclick = () => {
+  mode = mode === 'login' ? 'register' : 'login';
+  $('authTitle').textContent = $('authSubmit').textContent = mode === 'login' ? 'Log in' : 'Register';
+  $('authToggle').textContent = mode === 'login' ? 'Need an account? Register' : 'Have an account? Log in';
+};
+$('authSubmit').onclick = async () => {
+  $('authError').textContent = '';
+  try {
+    const d = await api('/auth/' + mode, { method: 'POST', body: { email: $('email').value, password: $('password').value } });
+    token = d.token; localStorage.setItem('token', token); localStorage.setItem('email', d.email);
+    $('password').value = ''; showApp(d.email);
+  } catch (e) { $('authError').textContent = e.message; }
+};
+$('logout').onclick = logout;
+
+async function load() {
+  try {
+    const p = new URLSearchParams();
+    if ($('search').value.trim()) p.set('q', $('search').value.trim());
+    if ($('fPriority').value) p.set('priority', $('fPriority').value);
+    const { tasks } = await api('/tasks?' + p);
+    render(tasks); $('appError').textContent = '';
+  } catch (e) { $('appError').textContent = e.message; }
+}
+
+function render(tasks) {
+  const board = $('board'); board.replaceChildren();
+  const today = new Date().toISOString().slice(0, 10);
+  COLS.forEach(([status, label], ci) => {
+    const col = document.createElement('div'); col.className = 'col';
+    const mine = tasks.filter((t) => t.status === status);
+    const h = document.createElement('h2'); h.textContent = `${label} (${mine.length})`; col.append(h);
+    mine.forEach((t) => {
+      const el = document.createElement('div'); el.className = 'task ' + t.priority;
+      const title = document.createElement('div'); title.className = 'title'; title.textContent = t.title;
+      el.append(title);
+      if (t.description) { const d = document.createElement('div'); d.className = 'desc'; d.textContent = t.description; el.append(d); }
+      const meta = document.createElement('div'); meta.className = 'meta';
+      const due = document.createElement('span');
+      due.textContent = t.due_date ? 'Due ' + t.due_date : t.priority;
+      if (t.due_date && t.due_date < today && status !== 'done') due.classList.add('overdue');
+      const actions = document.createElement('div'); actions.className = 'actions';
+      const btn = (txt, fn, tip) => { const b = document.createElement('button'); b.className = 'small'; b.textContent = txt; b.title = tip; b.onclick = fn; actions.append(b); };
+      if (ci > 0) btn('←', () => update(t.id, { status: COLS[ci - 1][0] }), 'Move back');
+      if (ci < 2) btn('→', () => update(t.id, { status: COLS[ci + 1][0] }), 'Move forward');
+      btn('✎', () => edit(t), 'Rename');
+      btn('🗑', () => remove(t.id), 'Delete');
+      meta.append(due, actions); el.append(meta); col.append(el);
+    });
+    board.append(col);
+  });
+}
+
+const guard = (fn) => async (...a) => { try { await fn(...a); } catch (e) { $('appError').textContent = e.message; } };
+const update = guard(async (id, body) => { await api('/tasks/' + id, { method: 'PATCH', body }); await load(); });
+const remove = guard(async (id) => { if (confirm('Delete this task?')) { await api('/tasks/' + id, { method: 'DELETE' }); await load(); } });
+const edit = (t) => { const title = prompt('Task title', t.title); if (title && title.trim()) update(t.id, { title }); };
+
+$('add').onclick = guard(async () => {
+  await api('/tasks', { method: 'POST', body: { title: $('nTitle').value, priority: $('nPriority').value, due_date: $('nDue').value || null } });
+  $('nTitle').value = ''; $('nDue').value = ''; await load();
+});
+$('nTitle').addEventListener('keydown', (e) => e.key === 'Enter' && $('add').click());
+$('search').oninput = () => { clearTimeout(debounce); debounce = setTimeout(load, 250); };
+$('fPriority').onchange = load;
+
+if (token) showApp();
+</script>
+</body>
+</html>
